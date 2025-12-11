@@ -95,6 +95,51 @@ pipeline {
       }
     }
   }
+  
+  stage('Trivy Scan & Warnings') {
+    when {
+      expression { return fileExists('Dockerfile') }
+  }
+    steps {
+      script {
+        def img = "simple_app:${env.BUILD_NUMBER}"
+
+      // Run Trivy scan and produce JSON output
+      sh """
+        docker run --rm \
+         -v /var/run/docker.sock:/var/run/docker.sock \
+         -v \$(pwd):/workdir \
+         aquasec/trivy:latest image \
+         --format json \
+         --output /workdir/trivy-report.json \
+         --severity HIGH,CRITICAL \
+         --exit-code 0 \
+         ${img}
+      """
+
+      // Convert JSON → SARIF (Warnings NG supports SARIF)
+      sh """
+        docker run --rm \
+          -v \$(pwd):/workdir \
+          aquasec/trivy:latest convert \
+          --format sarif \
+          --output /workdir/trivy-report.sarif \
+          /workdir/trivy-report.json
+      """
+
+      // Archive scan reports
+      archiveArtifacts artifacts: 'trivy-report.json', onlyIfSuccessful: true
+      archiveArtifacts artifacts: 'trivy-report.sarif', onlyIfSuccessful: true
+    }
+  }
+  post {
+    always {
+      // Publish Trivy warnings in Jenkins UI (requires Warnings NG plugin)
+      recordIssues tools: [sarif(pattern: 'trivy-report.sarif')]
+    }
+  }
+}
+
 
   post {
     success {
