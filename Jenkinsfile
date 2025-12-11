@@ -57,6 +57,22 @@ pipeline {
       }
     }
   }
+  
+stage('Trivy Scan') {
+  when { expression { return fileExists('Dockerfile') } }
+  steps {
+    script {
+      def img = "simple_app:${env.BUILD_NUMBER}"
+      // build image earlier in pipeline or ensure it exists
+      sh """
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \$(pwd):/workdir \
+          aquasec/trivy:latest image --format json --output /workdir/trivy-report.json \
+          --severity HIGH,CRITICAL --exit-code 1 ${img}
+      """
+      archiveArtifacts artifacts: 'trivy-report.json', onlyIfSuccessful: true
+    }
+  }
+}
 
   post {
     success {
