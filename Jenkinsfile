@@ -15,7 +15,7 @@ pipeline {
       steps {
         checkout([
           $class: 'GitSCM',
-          branches: [[name: '*/main']], // change to master if you use master
+          branches: [[name: '*/main']], // change to '*/master' if needed
           userRemoteConfigs: [[url: env.GIT_REPO]]
         ])
       }
@@ -48,43 +48,46 @@ pipeline {
     }
 
     stage('Docker Build (optional)') {
-      when {
-        expression { return fileExists('Dockerfile') }
-      }
+      when { expression { return fileExists('Dockerfile') } }
       steps {
         script {
-          def img = "simple_app:${env.BUILD_NUMBER}"
-          sh "docker build -t ${img} ."
+          env.IMAGE_NAME = "simple_app:${env.BUILD_NUMBER}"
+          sh "docker build -t ${env.IMAGE_NAME} ."
         }
       }
     }
 
-    // ===== Trivy scan stage - properly inside 'stages' =====
-    stage('Trivy Scan') {
-      when {
-        expression { return fileExists('Dockerfile') } // scan only if Dockerfile exists / image built
-      }
+    // ===== Trivy scan + convert to SARIF + publish Warnings NG =====
+    stage('Trivy Scan & Warnings') {
+      when { expression { return fileExists('Dockerfile') } }
       steps {
         script {
-          def img = "simple_app:${env.BUILD_NUMBER}"
-          // Run Trivy official Docker image to scan the local image and output JSON report to workspace
+          // image name built earlier
+          def img = env.IMAGE_NAME ?: "simple_app:${env.BUILD_NUMBER}"
+
+          // Run trivy image scan -> JSON (do not fail the pipeline here; we want to publish warnings)
           sh """
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \$(pwd):/workdir \\
               aquasec/trivy:latest image --format json --output /workdir/trivy-report.json \\
-              --severity HIGH,CRITICAL --exit-code 1 ${img} || true
+              --severity HIGH,CRITICAL --exit-code 0 ${img} || true
           """
-          // Print a compact summary (if jq available), otherwise print count fallback
-          sh '''
-            if command -v jq >/dev/null 2>&1; then
-              echo "Trivy summary:"
-              jq -r '.Results[] | {Target:.Target, Vulnerabilities:(.Vulnerabilities|length)}' trivy-report.json || true
-            else
-              echo "jq not available — printing raw report head"
-              head -n 200 trivy-report.json || true
-            fi
-          '''
-          // Archive the JSON report for later inspection
-          archiveArtifacts artifacts: 'trivy-report.json', onlyIfSuccessful: true
+
+          // Convert trivy JSON -> SARIF (Warnings NG supports SARIF format)
+          sh """
+            docker run --rm -v \$(pwd):/workdir aquasec/trivy:latest convert \\
+              --format sarif --output /workdir/trivy-report.sarif /workdir/trivy-report.json || true
+          """
+
+          // Archive reports so they are downloadable from the build
+          archiveArtifacts artifacts: 'trivy-report.json, trivy-report.sarif', onlyIfSuccessful: false
+        }
+      }
+
+      post {
+        always {
+          // Publish the SARIF into Warnings NG (requires Warnings Next Generation plugin)
+          // Make sure Warnings NG plugin is installed in Jenkins.
+          recordIssues tools: [sarif(pattern: 'trivy-report.sarif')]
         }
       }
     }
@@ -95,61 +98,10 @@ pipeline {
       }
     }
   }
-  
-  stage('Trivy Scan & Warnings') {
-    when {
-      expression { return fileExists('Dockerfile') }
-  }
-    steps {
-      script {
-        def img = "simple_app:${env.BUILD_NUMBER}"
-
-      // Run Trivy scan and produce JSON output
-      sh """
-        docker run --rm \
-         -v /var/run/docker.sock:/var/run/docker.sock \
-         -v \$(pwd):/workdir \
-         aquasec/trivy:latest image \
-         --format json \
-         --output /workdir/trivy-report.json \
-         --severity HIGH,CRITICAL \
-         --exit-code 0 \
-         ${img}
-      """
-
-      // Convert JSON → SARIF (Warnings NG supports SARIF)
-      sh """
-        docker run --rm \
-          -v \$(pwd):/workdir \
-          aquasec/trivy:latest convert \
-          --format sarif \
-          --output /workdir/trivy-report.sarif \
-          /workdir/trivy-report.json
-      """
-
-      // Archive scan reports
-      archiveArtifacts artifacts: 'trivy-report.json', onlyIfSuccessful: true
-      archiveArtifacts artifacts: 'trivy-report.sarif', onlyIfSuccessful: true
-    }
-  }
-  post {
-    always {
-      // Publish Trivy warnings in Jenkins UI (requires Warnings NG plugin)
-      recordIssues tools: [sarif(pattern: 'trivy-report.sarif')]
-    }
-  }
-}
-
 
   post {
-    success {
-      echo "Pipeline finished SUCCESS"
-    }
-    failure {
-      echo "Pipeline finished FAILURE"
-    }
-    always {
-      cleanWs()
-    }
+    success { echo "Pipeline finished SUCCESS" }
+    failure { echo "Pipeline finished FAILURE" }
+    always { cleanWs() }
   }
 }
