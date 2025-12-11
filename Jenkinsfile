@@ -9,22 +9,35 @@ pipeline {
         }
 
         stage('Install Dependencies') {
-            steps {
-                sh 'pip install -r requirements.txt'
-            }
-        }
+  steps {
+    sh '''
+      python -m venv .venv
+      . .venv/bin/activate
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt
+    '''
+  }
+}
 
-        stage('Run Tests') {
-            steps {
-                echo "No tests yet!"
-            }
-        }
+stage('Run Tests') {
+  steps {
+    sh '''
+      . .venv/bin/activate
+      # run your tests here, example:
+      # pytest -q
+      echo "No tests yet"
+    '''
+  }
+}
 
-        stage('Run App') {
-            steps {
-                echo "Starting Flask app"
-                sh 'python app.py &'
-            }
-        }
-    }
+stage('Run App') {
+  steps {
+    sh '''
+      . .venv/bin/activate
+      # run app in background for demo (not for production)
+      python app.py &
+    '''
+  }
+}
+
 }
