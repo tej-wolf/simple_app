@@ -15,7 +15,7 @@ pipeline {
       steps {
         checkout([
           $class: 'GitSCM',
-          branches: [[name: '*/main']],
+          branches: [[name: '*/main']], // change to master if you use master
           userRemoteConfigs: [[url: env.GIT_REPO]]
         ])
       }
@@ -23,17 +23,27 @@ pipeline {
 
     stage('Build') {
       steps {
-        script {
-          echo "Building project..."
-        }
+        echo "Building project..."
+        sh '''
+          if [ -f pom.xml ]; then
+            mvn -B -DskipTests clean package
+          else
+            echo "No pom.xml found — skipping Maven build"
+          fi
+        '''
       }
     }
 
     stage('Unit Tests') {
       steps {
-        script {
-          echo "Running tests..."
-        }
+        echo "Running unit tests..."
+        sh '''
+          if [ -f pom.xml ]; then
+            mvn test || true
+          else
+            echo "No tests to run (no pom.xml)"
+          fi
+        '''
       }
     }
 
@@ -43,43 +53,55 @@ pipeline {
       }
       steps {
         script {
-          echo "Dockerfile found — building image"
-          sh "docker build -t simple_app:${env.BUILD_NUMBER} ."
+          def img = "simple_app:${env.BUILD_NUMBER}"
+          sh "docker build -t ${img} ."
         }
       }
     }
 
-    stage('Deploy') {
+    // ===== Trivy scan stage - properly inside 'stages' =====
+    stage('Trivy Scan') {
+      when {
+        expression { return fileExists('Dockerfile') } // scan only if Dockerfile exists / image built
+      }
       steps {
         script {
-          echo "Deployment placeholder — no actions yet"
+          def img = "simple_app:${env.BUILD_NUMBER}"
+          // Run Trivy official Docker image to scan the local image and output JSON report to workspace
+          sh """
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \$(pwd):/workdir \\
+              aquasec/trivy:latest image --format json --output /workdir/trivy-report.json \\
+              --severity HIGH,CRITICAL --exit-code 1 ${img} || true
+          """
+          // Print a compact summary (if jq available), otherwise print count fallback
+          sh '''
+            if command -v jq >/dev/null 2>&1; then
+              echo "Trivy summary:"
+              jq -r '.Results[] | {Target:.Target, Vulnerabilities:(.Vulnerabilities|length)}' trivy-report.json || true
+            else
+              echo "jq not available — printing raw report head"
+              head -n 200 trivy-report.json || true
+            fi
+          '''
+          // Archive the JSON report for later inspection
+          archiveArtifacts artifacts: 'trivy-report.json', onlyIfSuccessful: true
         }
       }
     }
-  }
-  
-stage('Trivy Scan') {
-  when { expression { return fileExists('Dockerfile') } }
-  steps {
-    script {
-      def img = "simple_app:${env.BUILD_NUMBER}"
-      // build image earlier in pipeline or ensure it exists
-      sh """
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \$(pwd):/workdir \
-          aquasec/trivy:latest image --format json --output /workdir/trivy-report.json \
-          --severity HIGH,CRITICAL --exit-code 1 ${img}
-      """
-      archiveArtifacts artifacts: 'trivy-report.json', onlyIfSuccessful: true
+
+    stage('Deploy (placeholder)') {
+      steps {
+        echo "Deploy step — add your deploy commands here"
+      }
     }
   }
-}
 
   post {
     success {
-      echo "Pipeline completed SUCCESS"
+      echo "Pipeline finished SUCCESS"
     }
     failure {
-      echo "Pipeline completed FAILURE"
+      echo "Pipeline finished FAILURE"
     }
     always {
       cleanWs()
